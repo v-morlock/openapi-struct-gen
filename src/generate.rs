@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, HashSet};
 use check_keyword::CheckKeyword;
 
 use codegen::Scope;
-use heck::ToSnekCase;
+use heck::{ToPascalCase, ToSnekCase};
 use openapiv3::{
     ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ReferenceOr, Schema,
-    SchemaKind, Type, VariantOrUnknownOrEmpty,
+    SchemaKind, StringType, Type, VariantOrUnknownOrEmpty,
 };
 
 pub fn generate(
@@ -218,11 +218,71 @@ fn generate_struct(
         Type::Array(a) => {
             scope.raw(&format!("pub type {} = {};", name, gen_array_type(a)));
         }
+        Type::String(s) if !s.enumeration.is_empty() => {
+            generate_string_enum(
+                scope,
+                name,
+                s,
+                derivatives,
+                annotations_before,
+                annotations_after,
+            );
+        }
         t => {
             scope.raw(&format!(
                 "pub type {} = {};",
                 name,
                 gen_type_name_for_type(t)
+            ));
+        }
+    }
+}
+
+fn generate_string_enum(
+    scope: &mut Scope,
+    name: String,
+    s: StringType,
+    derivatives: Option<&[&str]>,
+    annotations_before: Option<&[(&str, Option<&[&str]>)]>,
+    annotations_after: Option<&[(&str, Option<&[&str]>)]>,
+) {
+    if let Some(annotations) = annotations_before {
+        for (annotation, exceptions) in annotations {
+            let is_exception = exceptions
+                .map(|e| e.iter().any(|e| *e == name.as_str()))
+                .unwrap_or(false);
+            if !is_exception {
+                scope.raw(annotation);
+            }
+        }
+    }
+
+    let mut derivs = vec!["Debug"];
+    if let Some(derivatives) = derivatives {
+        derivs.extend(derivatives);
+    }
+    scope.raw(&format!("#[derive({})]", derivs.join(", ")));
+
+    if let Some(annotations) = annotations_after {
+        for (annotation, exceptions) in annotations {
+            let is_exception = exceptions
+                .map(|e| e.iter().any(|e| *e == name.as_str()))
+                .unwrap_or(false);
+            if !is_exception {
+                scope.raw(annotation);
+            }
+        }
+    }
+
+    let r#enum = scope.new_enum(&name).vis("pub");
+    for variant in s.enumeration.into_iter().flatten() {
+        let pascal = variant.to_pascal_case();
+        if pascal == variant {
+            r#enum.new_variant(&pascal);
+        } else {
+            r#enum.new_variant(&format!(
+                "#[serde(rename = \"{}\")]\n    {}",
+                variant, pascal
             ));
         }
     }

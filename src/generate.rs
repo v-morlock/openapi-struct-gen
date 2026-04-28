@@ -274,15 +274,25 @@ fn generate_string_enum(
         }
     }
 
+    let has_default = derivs.iter().any(|d| *d == "Default");
     let r#enum = scope.new_enum(&name).vis("pub");
-    for variant in s.enumeration.into_iter().flatten() {
+    for (i, variant) in s.enumeration.into_iter().flatten().enumerate() {
         let pascal = variant.to_pascal_case();
+        let default_attr = if has_default && i == 0 {
+            "#[default]\n    "
+        } else {
+            ""
+        };
         if pascal == variant {
-            r#enum.new_variant(&pascal);
+            if default_attr.is_empty() {
+                r#enum.new_variant(&pascal);
+            } else {
+                r#enum.new_variant(&format!("{}{}", default_attr, pascal));
+            }
         } else {
             r#enum.new_variant(&format!(
-                "#[serde(rename = \"{}\")]\n    {}",
-                variant, pascal
+                "{}#[serde(rename = \"{}\")]\n    {}",
+                default_attr, variant, pascal
             ));
         }
     }

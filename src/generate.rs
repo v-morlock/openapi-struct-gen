@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use check_keyword::CheckKeyword;
 
-use codegen::Scope;
+use codegen::{Field, Scope};
 use heck::{ToPascalCase, ToSnekCase};
 use openapiv3::{
     ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ReferenceOr, Schema,
@@ -212,7 +212,12 @@ fn generate_struct(
             for (name, refor) in obj.properties {
                 let is_required = required.contains(&name);
                 let t = get_property_type_from_schema_refor(refor.unbox(), is_required);
-                r#struct.field(&format!("pub {}", &name.to_snek_case().into_safe()), &t);
+                let snake = name.to_snek_case().into_safe();
+                let mut field = Field::new(&format!("pub {}", &snake), t.as_str());
+                if snake != name {
+                    field.annotation(vec![&format!("#[serde(rename = \"{}\")]", name)]);
+                }
+                r#struct.push_field(field);
             }
         }
         Type::Array(a) => {

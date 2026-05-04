@@ -4,10 +4,9 @@ use check_keyword::CheckKeyword;
 
 use codegen::{Field, Scope};
 use heck::{ToPascalCase, ToSnekCase};
-use indexmap::IndexMap;
 use openapiv3::{
-    ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ObjectType, ReferenceOr,
-    Schema, SchemaKind, StringType, Type, VariantOrUnknownOrEmpty,
+    ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ReferenceOr, Schema,
+    SchemaKind, StringType, Type, VariantOrUnknownOrEmpty,
 };
 
 fn schema_kind_key(sk: &SchemaKind) -> Option<&'static str> {
@@ -189,85 +188,81 @@ fn generate_for_schema(
             annotations_before,
             annotations_after,
         ),
-        SchemaKind::AllOf { .. } => {
-            let merged = resolve_all_of(name, schemas, &mut HashSet::new());
-            generate_struct(
-                scope,
-                safe,
-                Type::Object(merged),
-                schemas,
-                description,
-                label,
-                derivatives,
-                annotations_before,
-                annotations_after,
-                field_annotations,
-            );
-        }
+        SchemaKind::AllOf { all_of } => generate_all_of(
+            scope,
+            safe,
+            all_of.clone(),
+            description,
+            label,
+            derivatives,
+            annotations_before,
+            annotations_after,
+        ),
         _ => {}
     }
 }
 
-fn resolve_all_of(
-    name: &str,
-    schemas: &BTreeMap<String, Schema>,
-    visited: &mut HashSet<String>,
-) -> ObjectType {
-    let mut props: IndexMap<String, ReferenceOr<Box<Schema>>> = IndexMap::new();
-    let mut required: Vec<String> = Vec::new();
-    if !visited.insert(name.to_string()) {
-        return ObjectType {
-            properties: props,
-            required,
-            additional_properties: None,
-            min_properties: None,
-            max_properties: None,
-        };
-    }
-    if let Some(s) = schemas.get(name) {
-        merge_member(s, schemas, visited, &mut props, &mut required);
-    }
-    ObjectType {
-        properties: props,
-        required,
-        additional_properties: None,
-        min_properties: None,
-        max_properties: None,
-    }
-}
-
-fn merge_member(
-    s: &Schema,
-    schemas: &BTreeMap<String, Schema>,
-    visited: &mut HashSet<String>,
-    props: &mut IndexMap<String, ReferenceOr<Box<Schema>>>,
-    required: &mut Vec<String>,
+fn generate_all_of(
+    scope: &mut Scope,
+    name: String,
+    members: Vec<ReferenceOr<Schema>>,
+    description: Option<&str>,
+    type_label: &str,
+    derivatives: Option<&[&str]>,
+    annotations_before: Option<&[(&str, Option<&[&str]>)]>,
+    annotations_after: Option<&[(&str, Option<&[&str]>)]>,
 ) {
-    match &s.schema_kind {
-        SchemaKind::Type(Type::Object(o)) => {
-            for (k, v) in o.properties.iter() {
-                props.insert(k.clone(), v.clone());
-            }
-            required.extend(o.required.iter().cloned());
-        }
-        SchemaKind::AllOf { all_of } => {
-            for m in all_of {
-                match m {
-                    ReferenceOr::Reference { reference } => {
-                        let key = reference.split('/').last().unwrap();
-                        if visited.insert(key.to_string()) {
-                            if let Some(s2) = schemas.get(key) {
-                                merge_member(s2, schemas, visited, props, required);
-                            }
-                        }
-                    }
-                    ReferenceOr::Item(s2) => {
-                        merge_member(s2, schemas, visited, props, required);
-                    }
-                }
+    emit_doc(scope, description, type_label);
+    if let Some(annotations) = annotations_before {
+        for (annotation, exceptions) in annotations {
+            let is_exception = if let Some(exceptions) = exceptions {
+                exceptions.iter().any(|e| **e == *name.as_str())
+            } else {
+                false
+            };
+            if !is_exception {
+                scope.raw(annotation);
             }
         }
-        _ => {}
+    }
+    let mut derivs = vec!["Debug"];
+    if let Some(derivatives) = derivatives {
+        derivs.extend(derivatives);
+    }
+    scope.raw(&format!("#[derive({})]", derivs.join(", ")));
+    if let Some(annotations) = annotations_after {
+        for (annotation, exceptions) in annotations {
+            let is_exception = if let Some(exceptions) = exceptions {
+                exceptions.iter().any(|e| **e == *name.as_str())
+            } else {
+                false
+            };
+            if !is_exception {
+                scope.raw(annotation);
+            }
+        }
+    }
+
+    let r#struct = scope.new_struct(&name).vis("pub");
+    let mut used: HashSet<String> = HashSet::new();
+    for m in members.into_iter() {
+        let ty = match &m {
+            ReferenceOr::Reference { reference } => {
+                sanitize_name(reference.split('/').last().unwrap())
+            }
+            ReferenceOr::Item(_) => continue,
+        };
+        let base = ty.to_snek_case().into_safe();
+        let mut field_name = base.clone();
+        let mut c = 2;
+        while used.contains(&field_name) {
+            field_name = format!("{}_{}", base, c);
+            c += 1;
+        }
+        used.insert(field_name.clone());
+        let mut field = Field::new(&format!("pub {}", &field_name), ty.as_str());
+        field.annotation(vec!["#[serde(flatten)]"]);
+        r#struct.push_field(field);
     }
 }
 

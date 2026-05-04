@@ -104,6 +104,16 @@ fn unique_name(suggested: &str, schemas: &BTreeMap<String, Schema>) -> String {
     unreachable!()
 }
 
+fn preferred_name(suggested: &str, item: &Schema) -> String {
+    if let Some(title) = item.schema_data.title.as_deref() {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_upper_camel_case();
+        }
+    }
+    suggested.to_string()
+}
+
 fn lift_or_recurse(
     suggested: &str,
     slot: &mut ReferenceOr<Schema>,
@@ -115,7 +125,8 @@ fn lift_or_recurse(
         ReferenceOr::Item(s) => s,
     };
     if is_complex(&item.schema_kind) {
-        let name = unique_name(suggested, schemas);
+        let suggested = preferred_name(suggested, item);
+        let name = unique_name(&suggested, schemas);
         let placeholder = ReferenceOr::Reference {
             reference: format!("#/components/schemas/{}", name),
         };
@@ -140,7 +151,8 @@ fn lift_or_recurse_boxed(
         ReferenceOr::Item(s) => s,
     };
     if is_complex(&item.schema_kind) {
-        let name = unique_name(suggested, schemas);
+        let suggested = preferred_name(suggested, item);
+        let name = unique_name(&suggested, schemas);
         let placeholder: ReferenceOr<Box<Schema>> = ReferenceOr::Reference {
             reference: format!("#/components/schemas/{}", name),
         };

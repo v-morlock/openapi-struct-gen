@@ -4,6 +4,7 @@ use check_keyword::CheckKeyword;
 
 use codegen::{Field, Scope};
 use heck::{ToPascalCase, ToSnekCase};
+use indexmap::IndexMap;
 use openapiv3::{
     ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ReferenceOr, Schema,
     SchemaKind, StringType, Type, VariantOrUnknownOrEmpty,
@@ -192,13 +193,63 @@ fn generate_for_schema(
             scope,
             safe,
             all_of.clone(),
+            schemas,
             description,
             label,
             derivatives,
             annotations_before,
             annotations_after,
+            field_annotations,
         ),
         _ => {}
+    }
+}
+
+fn collect_all_of(
+    members: &[ReferenceOr<Schema>],
+    schemas: &BTreeMap<String, Schema>,
+    visited: &mut HashSet<String>,
+    props: &mut IndexMap<String, ReferenceOr<Box<Schema>>>,
+    required: &mut Vec<String>,
+    flatten: &mut Vec<String>,
+) {
+    for m in members {
+        match m {
+            ReferenceOr::Reference { reference } => {
+                let key = reference.split('/').last().unwrap();
+                if !visited.insert(key.to_string()) {
+                    continue;
+                }
+                let Some(s) = schemas.get(key) else { continue };
+                match &s.schema_kind {
+                    SchemaKind::Type(Type::Object(o)) => {
+                        for (k, v) in o.properties.iter() {
+                            props.insert(k.clone(), v.clone());
+                        }
+                        required.extend(o.required.iter().cloned());
+                    }
+                    SchemaKind::AllOf { all_of } => {
+                        collect_all_of(all_of, schemas, visited, props, required, flatten);
+                    }
+                    SchemaKind::OneOf { .. } | SchemaKind::AnyOf { .. } => {
+                        flatten.push(sanitize_name(key));
+                    }
+                    _ => {}
+                }
+            }
+            ReferenceOr::Item(s) => match &s.schema_kind {
+                SchemaKind::Type(Type::Object(o)) => {
+                    for (k, v) in o.properties.iter() {
+                        props.insert(k.clone(), v.clone());
+                    }
+                    required.extend(o.required.iter().cloned());
+                }
+                SchemaKind::AllOf { all_of } => {
+                    collect_all_of(all_of, schemas, visited, props, required, flatten);
+                }
+                _ => {}
+            },
+        }
     }
 }
 
@@ -206,12 +257,27 @@ fn generate_all_of(
     scope: &mut Scope,
     name: String,
     members: Vec<ReferenceOr<Schema>>,
+    schemas: &BTreeMap<String, Schema>,
     description: Option<&str>,
     type_label: &str,
     derivatives: Option<&[&str]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
+    field_annotations: Option<&[(&str, &str, &str)]>,
 ) {
+    let mut props: IndexMap<String, ReferenceOr<Box<Schema>>> = IndexMap::new();
+    let mut required: Vec<String> = Vec::new();
+    let mut flatten: Vec<String> = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    collect_all_of(
+        &members,
+        schemas,
+        &mut visited,
+        &mut props,
+        &mut required,
+        &mut flatten,
+    );
+
     emit_doc(scope, description, type_label);
     if let Some(annotations) = annotations_before {
         for (annotation, exceptions) in annotations {
@@ -244,22 +310,48 @@ fn generate_all_of(
     }
 
     let r#struct = scope.new_struct(&name).vis("pub");
-    let mut used: HashSet<String> = HashSet::new();
-    for m in members.into_iter() {
-        let ty = match &m {
-            ReferenceOr::Reference { reference } => {
-                sanitize_name(reference.split('/').last().unwrap())
+    let required_set: HashSet<String> = required.into_iter().collect();
+    let mut used_field_names: HashSet<String> = HashSet::new();
+
+    for (pname, refor) in props {
+        let is_required = required_set.contains(&pname);
+        let (field_desc, field_label) = property_doc_info(&refor, schemas);
+        let type_key = property_type_key(&refor, schemas);
+        let nullable_inline = matches!(&refor, ReferenceOr::Item(s) if s.schema_data.nullable);
+        let doc_lines = field_doc_lines(field_desc, field_label);
+        let t = get_property_type_from_schema_refor(refor.unbox(), is_required);
+        let snake = pname.to_snek_case().into_safe();
+        used_field_names.insert(snake.clone());
+        let mut field = Field::new(&format!("pub {}", &snake), t.as_str());
+        field.doc(doc_lines.iter().map(String::as_str).collect());
+        let mut annotations: Vec<String> = Vec::new();
+        if let (Some(key), Some(mappings)) = (type_key, field_annotations) {
+            let is_optional = !is_required || nullable_inline;
+            for (k, req_ann, opt_ann) in mappings {
+                if *k == key {
+                    let ann = if is_optional { *opt_ann } else { *req_ann };
+                    annotations.push(ann.to_string());
+                }
             }
-            ReferenceOr::Item(_) => continue,
-        };
+        }
+        if snake != pname {
+            annotations.push(format!("#[serde(rename = \"{}\")]", pname));
+        }
+        if !annotations.is_empty() {
+            field.annotation(annotations.iter().map(String::as_str).collect());
+        }
+        r#struct.push_field(field);
+    }
+
+    for ty in flatten {
         let base = ty.to_snek_case().into_safe();
         let mut field_name = base.clone();
         let mut c = 2;
-        while used.contains(&field_name) {
+        while used_field_names.contains(&field_name) {
             field_name = format!("{}_{}", base, c);
             c += 1;
         }
-        used.insert(field_name.clone());
+        used_field_names.insert(field_name.clone());
         let mut field = Field::new(&format!("pub {}", &field_name), ty.as_str());
         field.annotation(vec!["#[serde(flatten)]"]);
         r#struct.push_field(field);
@@ -583,21 +675,38 @@ fn generate_enum(
                 let vname = inline_variant_name(&s, &name, i);
                 match s.schema_kind {
                     SchemaKind::Type(Type::Object(obj)) if !obj.properties.is_empty() => {
-                        body.push_str(&format!("    {} {{\n", vname));
                         let required: HashSet<String> = obj.required.into_iter().collect();
-                        for (pname, refor) in obj.properties {
+                        if obj.properties.len() == 1 {
+                            // Single-property inline object: emit a tuple variant so the
+                            // wire format `{"<PropName>": <value>}` matches serde's default
+                            // external tagging without double-nesting.
+                            let (pname, refor) = obj.properties.into_iter().next().unwrap();
                             let is_required = required.contains(&pname);
                             let ty = get_property_type_from_schema_refor(refor.unbox(), is_required);
-                            let snake = pname.to_snek_case().into_safe();
-                            if snake != pname {
+                            let variant = pname.to_pascal_case();
+                            if variant != pname {
                                 body.push_str(&format!(
-                                    "        #[serde(rename = \"{}\")]\n",
+                                    "    #[serde(rename = \"{}\")]\n",
                                     pname
                                 ));
                             }
-                            body.push_str(&format!("        {}: {},\n", snake, ty));
+                            body.push_str(&format!("    {}({}),\n", variant, ty));
+                        } else {
+                            body.push_str(&format!("    {} {{\n", vname));
+                            for (pname, refor) in obj.properties {
+                                let is_required = required.contains(&pname);
+                                let ty = get_property_type_from_schema_refor(refor.unbox(), is_required);
+                                let snake = pname.to_snek_case().into_safe();
+                                if snake != pname {
+                                    body.push_str(&format!(
+                                        "        #[serde(rename = \"{}\")]\n",
+                                        pname
+                                    ));
+                                }
+                                body.push_str(&format!("        {}: {},\n", snake, ty));
+                            }
+                            body.push_str("    },\n");
                         }
-                        body.push_str("    },\n");
                     }
                     other => {
                         let ty = gen_property_type_for_schema_kind(other);

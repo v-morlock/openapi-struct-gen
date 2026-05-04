@@ -559,7 +559,7 @@ fn generate_enum(
 
     let mut derivs = vec!["Debug"];
     if let Some(derivatives) = derivatives {
-        derivs.extend(derivatives);
+        derivs.extend(derivatives.iter().filter(|d| **d != "Default"));
     }
     scope.raw(&format!("#[derive({})]", derivs.join(", ")));
 
@@ -576,13 +576,9 @@ fn generate_enum(
         }
     }
 
-    let has_default = derivs.iter().any(|d| *d == "Default");
     let mut body = String::new();
     body.push_str(&format!("pub enum {} {{\n", name));
     for (i, t) in types.into_iter().enumerate() {
-        if has_default && i == 0 {
-            body.push_str("    #[default]\n");
-        }
         match t {
             ReferenceOr::Reference { reference } => {
                 let target = sanitize_name(reference.split('/').last().unwrap());

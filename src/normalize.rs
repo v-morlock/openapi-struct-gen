@@ -29,13 +29,17 @@ fn walk(
         SchemaKind::AnyOf { any_of } => {
             for (i, m) in any_of.iter_mut().enumerate() {
                 let suggested = variant_name(parent, i, m);
-                lift_or_recurse(&suggested, m, schemas, queue);
+                if let ReferenceOr::Item(s) = m {
+                    walk(&suggested, &mut s.schema_kind, schemas, queue);
+                }
             }
         }
         SchemaKind::OneOf { one_of } => {
             for (i, m) in one_of.iter_mut().enumerate() {
                 let suggested = variant_name(parent, i, m);
-                lift_or_recurse(&suggested, m, schemas, queue);
+                if let ReferenceOr::Item(s) = m {
+                    walk(&suggested, &mut s.schema_kind, schemas, queue);
+                }
             }
         }
         _ => {}

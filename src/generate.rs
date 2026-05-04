@@ -575,10 +575,53 @@ fn generate_enum(
             }
         }
     }
-    let r#enum = scope.new_enum(&name).vis("pub");
 
-    for t in types.into_iter() {
-        let t = get_property_type_from_schema_refor(t, true);
-        r#enum.new_variant(&t).tuple(&t);
+    let mut body = String::new();
+    body.push_str(&format!("pub enum {} {{\n", name));
+    for (i, t) in types.into_iter().enumerate() {
+        match t {
+            ReferenceOr::Reference { reference } => {
+                let target = sanitize_name(reference.split('/').last().unwrap());
+                body.push_str(&format!("    {}({}),\n", target, target));
+            }
+            ReferenceOr::Item(s) => {
+                let vname = inline_variant_name(&s, &name, i);
+                match s.schema_kind {
+                    SchemaKind::Type(Type::Object(obj)) if !obj.properties.is_empty() => {
+                        body.push_str(&format!("    {} {{\n", vname));
+                        let required: HashSet<String> = obj.required.into_iter().collect();
+                        for (pname, refor) in obj.properties {
+                            let is_required = required.contains(&pname);
+                            let ty = get_property_type_from_schema_refor(refor.unbox(), is_required);
+                            let snake = pname.to_snek_case().into_safe();
+                            if snake != pname {
+                                body.push_str(&format!(
+                                    "        #[serde(rename = \"{}\")]\n",
+                                    pname
+                                ));
+                            }
+                            body.push_str(&format!("        {}: {},\n", snake, ty));
+                        }
+                        body.push_str("    },\n");
+                    }
+                    other => {
+                        let ty = gen_property_type_for_schema_kind(other);
+                        body.push_str(&format!("    {}({}),\n", vname, ty));
+                    }
+                }
+            }
+        }
     }
+    body.push_str("}");
+    scope.raw(&body);
+}
+
+fn inline_variant_name(s: &Schema, parent: &str, i: usize) -> String {
+    if let Some(title) = s.schema_data.title.as_deref() {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_pascal_case();
+        }
+    }
+    format!("{}Variant{}", parent, i)
 }

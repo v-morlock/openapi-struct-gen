@@ -10,6 +10,32 @@ use openapiv3::{
     Schema, SchemaKind, StringType, Type, VariantOrUnknownOrEmpty,
 };
 
+fn schema_kind_key(sk: &SchemaKind) -> Option<&'static str> {
+    match sk {
+        SchemaKind::Type(Type::String(s)) if !s.enumeration.is_empty() => Some("enum"),
+        SchemaKind::Type(Type::String(_)) => Some("string"),
+        SchemaKind::Type(Type::Number(_)) => Some("number"),
+        SchemaKind::Type(Type::Integer(_)) => Some("integer"),
+        SchemaKind::Type(Type::Object(_)) => Some("object"),
+        SchemaKind::Type(Type::Array(_)) => Some("array"),
+        SchemaKind::Type(Type::Boolean {}) => Some("boolean"),
+        _ => None,
+    }
+}
+
+fn property_type_key<'a>(
+    refor: &ReferenceOr<Box<Schema>>,
+    schemas: &'a BTreeMap<String, Schema>,
+) -> Option<&'static str> {
+    match refor {
+        ReferenceOr::Item(s) => schema_kind_key(&s.schema_kind),
+        ReferenceOr::Reference { reference } => {
+            let key = reference.split('/').last().unwrap();
+            schemas.get(key).and_then(|t| schema_kind_key(&t.schema_kind))
+        }
+    }
+}
+
 fn schema_kind_label(sk: &SchemaKind) -> &'static str {
     match sk {
         SchemaKind::Type(Type::String(s)) if !s.enumeration.is_empty() => "string (enum)",
@@ -94,6 +120,7 @@ pub fn generate(
     imports: Option<&[(&str, &str)]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
+    field_annotations: Option<&[(&str, &str, &str)]>,
 ) -> String {
     let mut scope = Scope::new();
     if let Some(imports) = imports {
@@ -110,6 +137,7 @@ pub fn generate(
             derivatives,
             annotations_before,
             annotations_after,
+            field_annotations,
         );
     }
     scope.to_string()
@@ -122,6 +150,7 @@ fn generate_for_schema(
     derivatives: Option<&[&str]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
+    field_annotations: Option<&[(&str, &str, &str)]>,
 ) {
     let schema = &schemas[name];
     let safe = sanitize_name(name);
@@ -138,6 +167,7 @@ fn generate_for_schema(
             derivatives,
             annotations_before,
             annotations_after,
+            field_annotations,
         ),
         SchemaKind::OneOf { one_of } => generate_enum(
             scope,
@@ -171,6 +201,7 @@ fn generate_for_schema(
                 derivatives,
                 annotations_before,
                 annotations_after,
+                field_annotations,
             );
         }
         _ => {}
@@ -345,6 +376,7 @@ fn generate_struct(
     derivatives: Option<&[&str]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
+    field_annotations: Option<&[(&str, &str, &str)]>,
 ) {
     match r#type {
         Type::Object(obj) => {
@@ -385,13 +417,28 @@ fn generate_struct(
             for (name, refor) in obj.properties {
                 let is_required = required.contains(&name);
                 let (field_desc, field_label) = property_doc_info(&refor, schemas);
+                let type_key = property_type_key(&refor, schemas);
+                let nullable_inline = matches!(&refor, ReferenceOr::Item(s) if s.schema_data.nullable);
                 let doc_lines = field_doc_lines(field_desc, field_label);
                 let t = get_property_type_from_schema_refor(refor.unbox(), is_required);
                 let snake = name.to_snek_case().into_safe();
                 let mut field = Field::new(&format!("pub {}", &snake), t.as_str());
                 field.doc(doc_lines.iter().map(String::as_str).collect());
+                let mut annotations: Vec<String> = Vec::new();
+                if let (Some(key), Some(mappings)) = (type_key, field_annotations) {
+                    let is_optional = !is_required || nullable_inline;
+                    for (k, req_ann, opt_ann) in mappings {
+                        if *k == key {
+                            let ann = if is_optional { *opt_ann } else { *req_ann };
+                            annotations.push(ann.to_string());
+                        }
+                    }
+                }
                 if snake != name {
-                    field.annotation(vec![&format!("#[serde(rename = \"{}\")]", name)]);
+                    annotations.push(format!("#[serde(rename = \"{}\")]", name));
+                }
+                if !annotations.is_empty() {
+                    field.annotation(annotations.iter().map(String::as_str).collect());
                 }
                 r#struct.push_field(field);
             }

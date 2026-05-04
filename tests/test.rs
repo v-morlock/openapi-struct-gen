@@ -12,6 +12,11 @@ fn test_generate() {
             r#"#[serde(rename_all = "camelCase")]"#,
             Some(&["SearchRequest"]),
         )]),
+        Some(&[(
+            "integer",
+            r#"#[serde_as(as = "DisplayFromStr")]"#,
+            r#"#[serde_as(as = "Option<DisplayFromStr>")]"#,
+        )]),
     )
     .unwrap();
 }

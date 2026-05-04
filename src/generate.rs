@@ -10,6 +10,68 @@ use openapiv3::{
     Schema, SchemaKind, StringType, Type, VariantOrUnknownOrEmpty,
 };
 
+fn schema_kind_label(sk: &SchemaKind) -> &'static str {
+    match sk {
+        SchemaKind::Type(Type::String(s)) if !s.enumeration.is_empty() => "string (enum)",
+        SchemaKind::Type(Type::String(_)) => "string",
+        SchemaKind::Type(Type::Number(_)) => "number",
+        SchemaKind::Type(Type::Integer(_)) => "integer",
+        SchemaKind::Type(Type::Object(_)) => "object",
+        SchemaKind::Type(Type::Array(_)) => "array",
+        SchemaKind::Type(Type::Boolean {}) => "boolean",
+        SchemaKind::OneOf { .. } => "oneOf",
+        SchemaKind::AnyOf { .. } => "anyOf",
+        SchemaKind::AllOf { .. } => "allOf",
+        SchemaKind::Not { .. } => "not",
+        SchemaKind::Any(_) => "any",
+    }
+}
+
+fn emit_doc(scope: &mut Scope, description: Option<&str>, type_label: &str) {
+    if let Some(desc) = description {
+        for line in desc.lines() {
+            scope.raw(&format!("/// {}", line));
+        }
+        scope.raw("///");
+    }
+    scope.raw(&format!("/// Type: `{}`", type_label));
+}
+
+fn field_doc_lines(description: Option<&str>, type_label: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(desc) = description {
+        for line in desc.lines() {
+            lines.push(line.to_string());
+        }
+        lines.push(String::new());
+    }
+    lines.push(format!("Type: `{}`", type_label));
+    lines
+}
+
+fn property_doc_info<'a>(
+    refor: &'a ReferenceOr<Box<Schema>>,
+    schemas: &'a BTreeMap<String, Schema>,
+) -> (Option<&'a str>, &'a str) {
+    match refor {
+        ReferenceOr::Item(s) => (
+            s.schema_data.description.as_deref(),
+            schema_kind_label(&s.schema_kind),
+        ),
+        ReferenceOr::Reference { reference } => {
+            let key = reference.split('/').last().unwrap();
+            if let Some(target) = schemas.get(key) {
+                (
+                    target.schema_data.description.as_deref(),
+                    schema_kind_label(&target.schema_kind),
+                )
+            } else {
+                (None, "reference")
+            }
+        }
+    }
+}
+
 fn sanitize_name(name: &str) -> String {
     let mut out: String = name
         .chars()
@@ -63,11 +125,16 @@ fn generate_for_schema(
 ) {
     let schema = &schemas[name];
     let safe = sanitize_name(name);
+    let description = schema.schema_data.description.as_deref();
+    let label = schema_kind_label(&schema.schema_kind);
     match &schema.schema_kind {
         SchemaKind::Type(r#type) => generate_struct(
             scope,
             safe,
             r#type.clone(),
+            schemas,
+            description,
+            label,
             derivatives,
             annotations_before,
             annotations_after,
@@ -76,6 +143,8 @@ fn generate_for_schema(
             scope,
             safe,
             one_of.clone(),
+            description,
+            label,
             derivatives,
             annotations_before,
             annotations_after,
@@ -84,6 +153,8 @@ fn generate_for_schema(
             scope,
             safe,
             any_of.clone(),
+            description,
+            label,
             derivatives,
             annotations_before,
             annotations_after,
@@ -94,6 +165,9 @@ fn generate_for_schema(
                 scope,
                 safe,
                 Type::Object(merged),
+                schemas,
+                description,
+                label,
                 derivatives,
                 annotations_before,
                 annotations_after,
@@ -265,13 +339,16 @@ fn generate_struct(
     scope: &mut Scope,
     name: String,
     r#type: Type,
-
+    schemas: &BTreeMap<String, Schema>,
+    description: Option<&str>,
+    type_label: &str,
     derivatives: Option<&[&str]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
 ) {
     match r#type {
         Type::Object(obj) => {
+            emit_doc(scope, description, type_label);
             if let Some(annotations) = annotations_before {
                 for (annotation, exceptions) in annotations {
                     let is_exception = if let Some(exceptions) = exceptions {
@@ -307,9 +384,12 @@ fn generate_struct(
             let required = obj.required.into_iter().collect::<HashSet<String>>();
             for (name, refor) in obj.properties {
                 let is_required = required.contains(&name);
+                let (field_desc, field_label) = property_doc_info(&refor, schemas);
+                let doc_lines = field_doc_lines(field_desc, field_label);
                 let t = get_property_type_from_schema_refor(refor.unbox(), is_required);
                 let snake = name.to_snek_case().into_safe();
                 let mut field = Field::new(&format!("pub {}", &snake), t.as_str());
+                field.doc(doc_lines.iter().map(String::as_str).collect());
                 if snake != name {
                     field.annotation(vec![&format!("#[serde(rename = \"{}\")]", name)]);
                 }
@@ -317,6 +397,7 @@ fn generate_struct(
             }
         }
         Type::Array(a) => {
+            emit_doc(scope, description, type_label);
             scope.raw(&format!("pub type {} = {};", name, gen_array_type(a)));
         }
         Type::String(s) if !s.enumeration.is_empty() => {
@@ -324,12 +405,15 @@ fn generate_struct(
                 scope,
                 name,
                 s,
+                description,
+                type_label,
                 derivatives,
                 annotations_before,
                 annotations_after,
             );
         }
         t => {
+            emit_doc(scope, description, type_label);
             scope.raw(&format!(
                 "pub type {} = {};",
                 name,
@@ -343,10 +427,13 @@ fn generate_string_enum(
     scope: &mut Scope,
     name: String,
     s: StringType,
+    description: Option<&str>,
+    type_label: &str,
     derivatives: Option<&[&str]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
 ) {
+    emit_doc(scope, description, type_label);
     if let Some(annotations) = annotations_before {
         for (annotation, exceptions) in annotations {
             let is_exception = exceptions
@@ -403,10 +490,13 @@ fn generate_enum(
     scope: &mut Scope,
     name: String,
     types: Vec<ReferenceOr<Schema>>,
+    description: Option<&str>,
+    type_label: &str,
     derivatives: Option<&[&str]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
 ) {
+    emit_doc(scope, description, type_label);
     if let Some(annotations) = annotations_before {
         for (annotation, exceptions) in annotations {
             let is_exception = if let Some(exceptions) = exceptions {

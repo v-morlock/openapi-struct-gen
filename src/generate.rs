@@ -4,10 +4,27 @@ use check_keyword::CheckKeyword;
 
 use codegen::{Field, Scope};
 use heck::{ToPascalCase, ToSnekCase};
+use indexmap::IndexMap;
 use openapiv3::{
-    ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ReferenceOr, Schema,
-    SchemaKind, StringType, Type, VariantOrUnknownOrEmpty,
+    ArrayType, IntegerFormat, IntegerType, NumberFormat, NumberType, ObjectType, ReferenceOr,
+    Schema, SchemaKind, StringType, Type, VariantOrUnknownOrEmpty,
 };
+
+fn sanitize_name(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    if out
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        out.insert(0, '_');
+    }
+    out
+}
 
 pub fn generate(
     schemas: BTreeMap<String, Schema>,
@@ -22,11 +39,12 @@ pub fn generate(
             scope.import(path, name);
         }
     }
-    for (name, schema) in schemas.into_iter() {
+    let names: Vec<String> = schemas.keys().cloned().collect();
+    for name in names {
         generate_for_schema(
             &mut scope,
-            name,
-            schema,
+            &name,
+            &schemas,
             derivatives,
             annotations_before,
             annotations_after,
@@ -37,38 +55,114 @@ pub fn generate(
 
 fn generate_for_schema(
     scope: &mut Scope,
-    name: String,
-    schema: Schema,
+    name: &str,
+    schemas: &BTreeMap<String, Schema>,
     derivatives: Option<&[&str]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
 ) {
-    match schema.schema_kind {
+    let schema = &schemas[name];
+    let safe = sanitize_name(name);
+    match &schema.schema_kind {
         SchemaKind::Type(r#type) => generate_struct(
             scope,
-            name,
-            r#type,
+            safe,
+            r#type.clone(),
             derivatives,
             annotations_before,
             annotations_after,
         ),
         SchemaKind::OneOf { one_of } => generate_enum(
             scope,
-            name,
-            one_of,
+            safe,
+            one_of.clone(),
             derivatives,
             annotations_before,
             annotations_after,
         ),
         SchemaKind::AnyOf { any_of } => generate_enum(
             scope,
-            name,
-            any_of,
+            safe,
+            any_of.clone(),
             derivatives,
             annotations_before,
             annotations_after,
         ),
-        _ => panic!("Does not support 'allOf', 'not' and 'any'"),
+        SchemaKind::AllOf { .. } => {
+            let merged = resolve_all_of(name, schemas, &mut HashSet::new());
+            generate_struct(
+                scope,
+                safe,
+                Type::Object(merged),
+                derivatives,
+                annotations_before,
+                annotations_after,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn resolve_all_of(
+    name: &str,
+    schemas: &BTreeMap<String, Schema>,
+    visited: &mut HashSet<String>,
+) -> ObjectType {
+    let mut props: IndexMap<String, ReferenceOr<Box<Schema>>> = IndexMap::new();
+    let mut required: Vec<String> = Vec::new();
+    if !visited.insert(name.to_string()) {
+        return ObjectType {
+            properties: props,
+            required,
+            additional_properties: None,
+            min_properties: None,
+            max_properties: None,
+        };
+    }
+    if let Some(s) = schemas.get(name) {
+        merge_member(s, schemas, visited, &mut props, &mut required);
+    }
+    ObjectType {
+        properties: props,
+        required,
+        additional_properties: None,
+        min_properties: None,
+        max_properties: None,
+    }
+}
+
+fn merge_member(
+    s: &Schema,
+    schemas: &BTreeMap<String, Schema>,
+    visited: &mut HashSet<String>,
+    props: &mut IndexMap<String, ReferenceOr<Box<Schema>>>,
+    required: &mut Vec<String>,
+) {
+    match &s.schema_kind {
+        SchemaKind::Type(Type::Object(o)) => {
+            for (k, v) in o.properties.iter() {
+                props.insert(k.clone(), v.clone());
+            }
+            required.extend(o.required.iter().cloned());
+        }
+        SchemaKind::AllOf { all_of } => {
+            for m in all_of {
+                match m {
+                    ReferenceOr::Reference { reference } => {
+                        let key = reference.split('/').last().unwrap();
+                        if visited.insert(key.to_string()) {
+                            if let Some(s2) = schemas.get(key) {
+                                merge_member(s2, schemas, visited, props, required);
+                            }
+                        }
+                    }
+                    ReferenceOr::Item(s2) => {
+                        merge_member(s2, schemas, visited, props, required);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -123,19 +217,21 @@ fn gen_type_name_for_type(t: Type) -> String {
 }
 
 fn gen_property_type_for_schema_kind(sk: SchemaKind) -> String {
-    let t = match sk {
-        SchemaKind::Type(r#type) => r#type,
-        _ => panic!("Does not support 'oneOf', 'anyOf' 'allOf', 'not' and 'any'"),
-    };
-    gen_type_name_for_type(t)
+    match sk {
+        SchemaKind::Type(r#type) => gen_type_name_for_type(r#type),
+        _ => "serde_json::Value".into(),
+    }
 }
 
 fn get_property_type_from_schema_refor(refor: ReferenceOr<Schema>, is_required: bool) -> String {
-    let t = match refor {
-        ReferenceOr::Item(i) => gen_property_type_for_schema_kind(i.schema_kind),
-        ReferenceOr::Reference { reference } => handle_reference(reference),
+    let (t, nullable) = match refor {
+        ReferenceOr::Item(i) => (
+            gen_property_type_for_schema_kind(i.schema_kind),
+            i.schema_data.nullable,
+        ),
+        ReferenceOr::Reference { reference } => (handle_reference(reference), false),
     };
-    if is_required {
+    if is_required && !nullable {
         t
     } else {
         format!("Option<{}>", t)
@@ -162,7 +258,7 @@ fn handle_reference(reference: String) -> String {
     if split[2] != "schemas" {
         panic!("Only references to schemas are supported");
     }
-    split.pop().unwrap().to_owned()
+    sanitize_name(split.pop().unwrap())
 }
 
 fn generate_struct(

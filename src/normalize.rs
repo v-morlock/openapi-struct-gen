@@ -28,12 +28,14 @@ fn walk(
         }
         SchemaKind::AnyOf { any_of } => {
             for (i, m) in any_of.iter_mut().enumerate() {
-                lift_or_recurse(&format!("{}Variant{}", parent, i), m, schemas, queue);
+                let suggested = variant_name(parent, i, m);
+                lift_or_recurse(&suggested, m, schemas, queue);
             }
         }
         SchemaKind::OneOf { one_of } => {
             for (i, m) in one_of.iter_mut().enumerate() {
-                lift_or_recurse(&format!("{}Variant{}", parent, i), m, schemas, queue);
+                let suggested = variant_name(parent, i, m);
+                lift_or_recurse(&suggested, m, schemas, queue);
             }
         }
         _ => {}
@@ -61,6 +63,18 @@ fn walk_type(
         }
         _ => {}
     }
+}
+
+fn variant_name(parent: &str, i: usize, slot: &ReferenceOr<Schema>) -> String {
+    if let ReferenceOr::Item(s) = slot {
+        if let Some(title) = s.schema_data.title.as_deref() {
+            let trimmed = title.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_upper_camel_case();
+            }
+        }
+    }
+    format!("{}Variant{}", parent, i)
 }
 
 fn is_complex(kind: &SchemaKind) -> bool {

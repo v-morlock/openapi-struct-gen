@@ -98,8 +98,9 @@ fn property_doc_info<'a>(
     }
 }
 
-fn sanitize_name(name: &str) -> String {
-    let mut out: String = name
+fn to_type_name(name: &str) -> String {
+    let pascal = name.to_pascal_case();
+    let mut out: String = pascal
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
@@ -153,7 +154,7 @@ fn generate_for_schema(
     field_annotations: Option<&[(&str, &str, &str)]>,
 ) {
     let schema = &schemas[name];
-    let safe = sanitize_name(name);
+    let safe = to_type_name(name);
     let description = schema.schema_data.description.as_deref();
     let label = schema_kind_label(&schema.schema_kind);
     match &schema.schema_kind {
@@ -232,7 +233,7 @@ fn collect_all_of(
                         collect_all_of(all_of, schemas, visited, props, required, flatten);
                     }
                     SchemaKind::OneOf { .. } | SchemaKind::AnyOf { .. } => {
-                        flatten.push(sanitize_name(key));
+                        flatten.push(to_type_name(key));
                     }
                     _ => {}
                 }
@@ -450,7 +451,7 @@ fn handle_reference(reference: String) -> String {
     if split[2] != "schemas" {
         panic!("Only references to schemas are supported");
     }
-    sanitize_name(split.pop().unwrap())
+    to_type_name(split.pop().unwrap())
 }
 
 fn generate_struct(
@@ -668,7 +669,7 @@ fn generate_enum(
     for (i, t) in types.into_iter().enumerate() {
         match t {
             ReferenceOr::Reference { reference } => {
-                let target = sanitize_name(reference.split('/').last().unwrap());
+                let target = to_type_name(reference.split('/').last().unwrap());
                 body.push_str(&format!("    {}({}),\n", target, target));
             }
             ReferenceOr::Item(s) => {

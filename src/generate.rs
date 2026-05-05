@@ -122,6 +122,7 @@ pub fn generate(
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
     field_annotations: Option<&[(&str, &str, &str)]>,
+    skip_serializing_if_option_is_none: bool,
 ) -> String {
     let mut scope = Scope::new();
     if let Some(imports) = imports {
@@ -139,6 +140,7 @@ pub fn generate(
             annotations_before,
             annotations_after,
             field_annotations,
+            skip_serializing_if_option_is_none,
         );
     }
     scope.to_string()
@@ -152,6 +154,7 @@ fn generate_for_schema(
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
     field_annotations: Option<&[(&str, &str, &str)]>,
+    skip_serializing_if_option_is_none: bool,
 ) {
     let schema = &schemas[name];
     let safe = to_type_name(name);
@@ -169,6 +172,7 @@ fn generate_for_schema(
             annotations_before,
             annotations_after,
             field_annotations,
+            skip_serializing_if_option_is_none,
         ),
         SchemaKind::OneOf { one_of } => generate_enum(
             scope,
@@ -201,9 +205,40 @@ fn generate_for_schema(
             annotations_before,
             annotations_after,
             field_annotations,
+            skip_serializing_if_option_is_none,
         ),
         _ => {}
     }
+}
+
+fn collect_field_annotations(
+    original_name: &str,
+    rust_name: &str,
+    type_key: Option<&str>,
+    field_annotations: Option<&[(&str, &str, &str)]>,
+    is_optional: bool,
+    skip_serializing_if_option_is_none: bool,
+) -> Vec<String> {
+    let mut annotations = Vec::new();
+
+    if let (Some(key), Some(mappings)) = (type_key, field_annotations) {
+        for (k, req_ann, opt_ann) in mappings {
+            if *k == key {
+                let ann = if is_optional { *opt_ann } else { *req_ann };
+                annotations.push(ann.to_string());
+            }
+        }
+    }
+
+    if rust_name != original_name {
+        annotations.push(format!("#[serde(rename = \"{}\")]", original_name));
+    }
+
+    if is_optional && skip_serializing_if_option_is_none {
+        annotations.push("#[serde(skip_serializing_if = \"Option::is_none\")]".to_string());
+    }
+
+    annotations
 }
 
 fn collect_all_of(
@@ -265,6 +300,7 @@ fn generate_all_of(
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
     field_annotations: Option<&[(&str, &str, &str)]>,
+    skip_serializing_if_option_is_none: bool,
 ) {
     let mut props: IndexMap<String, ReferenceOr<Box<Schema>>> = IndexMap::new();
     let mut required: Vec<String> = Vec::new();
@@ -325,19 +361,15 @@ fn generate_all_of(
         used_field_names.insert(snake.clone());
         let mut field = Field::new(&format!("pub {}", &snake), t.as_str());
         field.doc(doc_lines.iter().map(String::as_str).collect());
-        let mut annotations: Vec<String> = Vec::new();
-        if let (Some(key), Some(mappings)) = (type_key, field_annotations) {
-            let is_optional = !is_required || nullable_inline;
-            for (k, req_ann, opt_ann) in mappings {
-                if *k == key {
-                    let ann = if is_optional { *opt_ann } else { *req_ann };
-                    annotations.push(ann.to_string());
-                }
-            }
-        }
-        if snake != pname {
-            annotations.push(format!("#[serde(rename = \"{}\")]", pname));
-        }
+        let is_optional = !is_required || nullable_inline;
+        let annotations = collect_field_annotations(
+            &pname,
+            &snake,
+            type_key,
+            field_annotations,
+            is_optional,
+            skip_serializing_if_option_is_none,
+        );
         if !annotations.is_empty() {
             field.annotation(annotations.iter().map(String::as_str).collect());
         }
@@ -465,6 +497,7 @@ fn generate_struct(
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
     annotations_after: Option<&[(&str, Option<&[&str]>)]>,
     field_annotations: Option<&[(&str, &str, &str)]>,
+    skip_serializing_if_option_is_none: bool,
 ) {
     match r#type {
         Type::Object(obj) => {
@@ -512,19 +545,15 @@ fn generate_struct(
                 let snake = name.to_snek_case().into_safe();
                 let mut field = Field::new(&format!("pub {}", &snake), t.as_str());
                 field.doc(doc_lines.iter().map(String::as_str).collect());
-                let mut annotations: Vec<String> = Vec::new();
-                if let (Some(key), Some(mappings)) = (type_key, field_annotations) {
-                    let is_optional = !is_required || nullable_inline;
-                    for (k, req_ann, opt_ann) in mappings {
-                        if *k == key {
-                            let ann = if is_optional { *opt_ann } else { *req_ann };
-                            annotations.push(ann.to_string());
-                        }
-                    }
-                }
-                if snake != name {
-                    annotations.push(format!("#[serde(rename = \"{}\")]", name));
-                }
+                let is_optional = !is_required || nullable_inline;
+                let annotations = collect_field_annotations(
+                    &name,
+                    &snake,
+                    type_key,
+                    field_annotations,
+                    is_optional,
+                    skip_serializing_if_option_is_none,
+                );
                 if !annotations.is_empty() {
                     field.annotation(annotations.iter().map(String::as_str).collect());
                 }

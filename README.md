@@ -29,6 +29,8 @@ fn main() {
         Some(&[("serde", "Serialize"), ("serde", "Deserialize")]),
         Some(&[(r#"#[skip_serializing_none]"#, None)]),
         Some(&[(r#"#[serde(rename_all = "camelCase")]"#, Some(&["Struct"]))]),
+        None,
+        true,
     ).unwrap();
 }
 ```
@@ -40,6 +42,8 @@ The fourth is use statements, being tuples of the path to an object and the obje
 the fifth is annotations that are to be put before the derive statement. Sometimes such are required, like serde\_with. Each annotation consists of a tuple - the annotation itself and optional list of structs that are not to have this annotation
 The sixth is annotations that are to be put after the derive statement. Most annotations would be applied like that.
 Each annotation consists of a tuple - the annotation itself and optional list of structs that are not to have this annotation
+The seventh is optional field annotation mappings, as tuples of `(schema_type, required_annotation, optional_annotation)`.
+The eighth controls whether generated `Option<T>` fields emit `#[serde(skip_serializing_if = "Option::is_none")]`.
 
 ### code:
 ```rust
@@ -51,4 +55,3 @@ openapi_struct_gen::include!("oapi");
 
 ## Non Goals
 * Generate web servers and clients
-

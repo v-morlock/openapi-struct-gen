@@ -5,24 +5,35 @@ use openapiv3::{
 };
 use std::collections::BTreeMap;
 
-pub fn parse_schema(oapi: OpenAPI) -> BTreeMap<String, Schema> {
+/// Component schemas that are a bare `$ref` (type aliases), name -> target name.
+pub type Aliases = BTreeMap<String, String>;
+
+pub fn parse_schema(oapi: OpenAPI) -> (BTreeMap<String, Schema>, Aliases) {
     let mut schemas: BTreeMap<String, Schema> = BTreeMap::new();
+    let mut aliases = Aliases::new();
     if let Some(components) = oapi.components {
-        gather_from_schemas(&mut schemas, components.schemas);
+        gather_from_schemas(&mut schemas, &mut aliases, components.schemas);
         gather_from_responses(&mut schemas, components.responses);
         gather_from_bodies(&mut schemas, components.request_bodies);
     }
     gather_from_paths(&mut schemas, oapi.paths.paths);
-    schemas
+    (schemas, aliases)
 }
 
 fn gather_from_schemas(
     schemas: &mut BTreeMap<String, Schema>,
+    aliases: &mut Aliases,
     map: IndexMap<String, ReferenceOr<Schema>>,
 ) {
     for (name, refor) in map.into_iter() {
-        if let ReferenceOr::Item(i) = refor {
-            schemas.insert(name, i);
+        match refor {
+            ReferenceOr::Item(i) => {
+                schemas.insert(name, i);
+            }
+            ReferenceOr::Reference { reference } => {
+                let target = reference.split('/').last().unwrap().to_owned();
+                aliases.insert(name, target);
+            }
         }
     }
 }

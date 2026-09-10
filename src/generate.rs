@@ -117,6 +117,7 @@ fn to_type_name(name: &str) -> String {
 
 pub fn generate(
     schemas: BTreeMap<String, Schema>,
+    aliases: BTreeMap<String, String>,
     derivatives: Option<&[&str]>,
     imports: Option<&[(&str, &str)]>,
     annotations_before: Option<&[(&str, Option<&[&str]>)]>,
@@ -129,6 +130,13 @@ pub fn generate(
         for (path, name) in imports {
             scope.import(path, name);
         }
+    }
+    for (name, target) in &aliases {
+        scope.raw(&format!(
+            "pub type {} = {};",
+            to_type_name(name),
+            to_type_name(target)
+        ));
     }
     let names: Vec<String> = schemas.keys().cloned().collect();
     for name in names {

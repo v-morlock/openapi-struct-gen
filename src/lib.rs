@@ -30,10 +30,11 @@ pub fn generate<P1: AsRef<std::path::Path>, P2: AsRef<std::path::Path>>(
         Some("yaml") | Some("yml") => serde_yaml::from_str(&data)?,
         o => return Err(GenError::WrongFileExtension(o.map(|s| s.to_owned()))),
     };
-    let mut schemas_map = parse::parse_schema(oapi);
+    let (mut schemas_map, aliases) = parse::parse_schema(oapi);
     normalize::normalize(&mut schemas_map);
     let resp = generate::generate(
         schemas_map,
+        aliases,
         derivatives,
         imports,
         annotations_before,
